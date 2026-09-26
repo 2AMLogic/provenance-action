@@ -1,0 +1,90 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/run.sh
+
+  self:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: nostory
+        uses: ./
+        with:
+          build-version: 1.0.0
+          export-env: "true"
+
+      - name: Assert no-story output shape
+        env:
+          TRAILERS: ${{ steps.nostory.outputs.trailers }}
+          MARKER: ${{ steps.nostory.outputs.marker }}
+          TRACE: ${{ steps.nostory.outputs.trace-id }}
+        run: |
+          set -euo pipefail
+          want=$(printf '%s\0%s\0%s\0%s\0' loom.ci.trace "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | sha256sum | cut -c1-32)
+          expected_trailers="Loom-Story: none
+          Loom-Trace-Id: $want
+          Loom-Build: 1.0.0 $GITHUB_SHA clean"
+          expected_trailers=$(printf '%s\n' "$expected_trailers" | sed 's/^ *//')
+          [ "$TRAILERS" = "$expected_trailers" ] || { printf 'trailers:\n%s\nwant:\n%s\n' "$TRAILERS" "$expected_trailers"; exit 1; }
+          [ "$(printf '%s\n' "$TRAILERS" | wc -l)" -eq 3 ]
+          [ "$TRACE" = "$want" ]
+          expected_marker="<!-- loom:provenance v1 build=1.0.0 $GITHUB_SHA clean prompts=none sweep=none story=none trace=$want host=none base=$GITHUB_SHA run=$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT -->"
+          [ "$MARKER" = "$expected_marker" ] || { printf 'marker: %s\nwant:   %s\n' "$MARKER" "$expected_marker"; exit 1; }
+          [ "$PROVENANCE_TRAILERS" = "$TRAILERS" ]
+          [ "$PROVENANCE_MARKER" = "$MARKER" ]
+          [ "$PROVENANCE_TRACE_ID" = "$TRACE" ]
+          echo "no-story stamps OK"
+
+      - id: story
+        uses: ./
+        with:
+          story: ${{ github.repository }}#1
+
+      - name: Assert same-repo story uses D32 v1 over GITHUB_REPOSITORY_ID
+        env:
+          TRAILERS: ${{ steps.story.outputs.trailers }}
+          MARKER: ${{ steps.story.outputs.marker }}
+          TRACE: ${{ steps.story.outputs.trace-id }}
+        run: |
+          set -euo pipefail
+          want=$(printf '%s' "loom-story/v1:github:${GITHUB_REPOSITORY_ID}:1" | sha256sum | cut -c1-32)
+          [ "$TRACE" = "$want" ]
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 1p)" = "Loom-Story: $GITHUB_REPOSITORY#1" ]
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 2p)" = "Loom-Trace-Id: $want" ]
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 3p)" = "Loom-Build: unknown $GITHUB_SHA clean" ]
+          case "$MARKER" in
+            "<!-- loom:provenance v1 build=unknown $GITHUB_SHA clean prompts=none sweep=none story=$GITHUB_REPOSITORY#1 trace=$want host=none base=$GITHUB_SHA run=$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT -->") ;;
+            *) echo "unexpected marker: $MARKER"; exit 1 ;;
+          esac
+          echo "story stamps OK"
+
+      - id: crossrepo
+        uses: ./
+        continue-on-error: true
+        with:
+          story: 2AMLogic/harness-ops#307
+
+      - id: badsha
+        uses: ./
+        continue-on-error: true
+        with:
+          sha: abc1234
+
+      - name: Assert bad input fails loudly
+        run: |
+          [ "${{ steps.crossrepo.outcome }}" = failure ]
+          [ "${{ steps.badsha.outcome }}" = failure ]
+          echo "failures OK"
