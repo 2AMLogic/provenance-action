@@ -12,13 +12,29 @@ jobs:
   vectors:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: bash tests/run.sh
+
+  # macOS: /bin/bash 3.2 and shasum. tests/run.sh also re-runs every vector
+  # with shasum as the only hasher on PATH, so the shasum branch is exercised
+  # whether or not the image also ships a sha256sum.
+  vectors-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run tests under /bin/bash 3.2
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          v=$(env bash -c 'echo "$BASH_VERSION"')
+          echo "bash on PATH: $(command -v bash) $v"
+          case $v in 3.2.*) ;; *) echo "expected bash 3.2 first on PATH, got $v"; exit 1 ;; esac
+          command -v shasum
+          /bin/bash tests/run.sh
 
   self:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - id: nostory
         uses: ./
@@ -34,10 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           want=$(printf '%s\0%s\0%s\0%s\0' loom.ci.trace "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | sha256sum | cut -c1-32)
-          expected_trailers="Loom-Story: none
-          Loom-Trace-Id: $want
-          Loom-Build: 1.0.0 $GITHUB_SHA clean"
-          expected_trailers=$(printf '%s\n' "$expected_trailers" | sed 's/^ *//')
+          expected_trailers=$(printf 'Loom-Story: none\nLoom-Trace-Id: %s\nLoom-Build: 1.0.0 %s clean' "$want" "$GITHUB_SHA")
           [ "$TRAILERS" = "$expected_trailers" ] || { printf 'trailers:\n%s\nwant:\n%s\n' "$TRAILERS" "$expected_trailers"; exit 1; }
           [ "$(printf '%s\n' "$TRAILERS" | wc -l)" -eq 3 ]
           [ "$TRACE" = "$want" ]
@@ -71,20 +84,67 @@ jobs:
           esac
           echo "story stamps OK"
 
+      # Failure cases. PROVENANCE_ACTION_ERROR_FILE lets the assert step check
+      # why each one failed, not only that it did.
       - id: crossrepo
         uses: ./
         continue-on-error: true
+        env:
+          PROVENANCE_ACTION_ERROR_FILE: ${{ runner.temp }}/crossrepo.err
         with:
           story: 2AMLogic/harness-ops#307
 
-      - id: badsha
+      - id: nonebuild
         uses: ./
         continue-on-error: true
+        env:
+          PROVENANCE_ACTION_ERROR_FILE: ${{ runner.temp }}/nonebuild.err
         with:
-          sha: abc1234
+          build-version: none
 
-      - name: Assert bad input fails loudly
+      - id: injection
+        uses: ./
+        continue-on-error: true
+        env:
+          PROVENANCE_ACTION_ERROR_FILE: ${{ runner.temp }}/injection.err
+        with:
+          build-version: "1.0.0\n-->\ntrace-id=00000000000000000000000000000001"
+
+      - name: Assert bad input fails loudly, for the right reason, emitting nothing
+        env:
+          CROSSREPO_OUTCOME: ${{ steps.crossrepo.outcome }}
+          CROSSREPO_TRACE: ${{ steps.crossrepo.outputs.trace-id }}
+          NONEBUILD_OUTCOME: ${{ steps.nonebuild.outcome }}
+          NONEBUILD_TRACE: ${{ steps.nonebuild.outputs.trace-id }}
+          INJECTION_OUTCOME: ${{ steps.injection.outcome }}
+          INJECTION_TRACE: ${{ steps.injection.outputs.trace-id }}
+          INJECTION_MARKER: ${{ steps.injection.outputs.marker }}
+          ERR_DIR: ${{ runner.temp }}
         run: |
-          [ "${{ steps.crossrepo.outcome }}" = failure ]
-          [ "${{ steps.badsha.outcome }}" = failure ]
+          set -euo pipefail
+          check() { # name outcome trace pattern
+            [ "$2" = failure ] || { echo "$1: outcome $2, want failure"; exit 1; }
+            [ -z "$3" ] || { echo "$1: emitted trace-id '$3' on failure"; exit 1; }
+            grep -F -- "$4" "$ERR_DIR/$1.err" || { echo "$1: want '$4', got: $(cat "$ERR_DIR/$1.err" 2>&1)"; exit 1; }
+          }
+          check crossrepo "$CROSSREPO_OUTCOME" "$CROSSREPO_TRACE" "pass its numeric id as story-repo-id"
+          check nonebuild "$NONEBUILD_OUTCOME" "$NONEBUILD_TRACE" "build-version may not be 'none'"
+          check injection "$INJECTION_OUTCOME" "$INJECTION_TRACE" "build-version must match"
+          [ -z "$INJECTION_MARKER" ] || { echo "injection: emitted marker"; exit 1; }
           echo "failures OK"
+
+      # Last: dirty the checkout and expect Loom-Build to say so.
+      - name: Modify a tracked file
+        run: echo "local change" >> README.md
+
+      - id: dirty
+        uses: ./
+
+      - name: Assert a modified checkout stamps dirty
+        env:
+          TRAILERS: ${{ steps.dirty.outputs.trailers }}
+        run: |
+          set -euo pipefail
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 3p)" = "Loom-Build: unknown $GITHUB_SHA dirty" ] \
+            || { printf 'trailers:\n%s\n' "$TRAILERS"; exit 1; }
+          echo "dirty OK"

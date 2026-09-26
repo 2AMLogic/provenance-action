@@ -1,5 +1,5 @@
 name: 2AMLogic provenance stamps
-description: Renders the 2AMLogic provenance stamps (three commit trailers and the hidden loom:provenance v1 PR marker) for a CI bot. No network, no secrets.
+description: Renders the 2AMLogic provenance stamps (three commit trailers and the hidden loom:provenance v1 PR marker) for a deterministic CI bot. The run context is read from the Actions environment only. No network, no secrets.
 author: 2AMLogic
 
 inputs:
@@ -20,7 +20,7 @@ inputs:
     required: false
     default: ""
   base:
-    description: "Full 40-hex commit the action started from, or 'none'. Defaults to GITHUB_SHA."
+    description: "Full 40-hex commit the action started from, 'none' or 'unknown'. Defaults to GITHUB_SHA (on pull_request events that is the synthetic merge commit; see README)."
     required: false
     default: ""
   host:
@@ -31,26 +31,6 @@ inputs:
     description: "'true' to also export PROVENANCE_TRAILERS, PROVENANCE_MARKER and PROVENANCE_TRACE_ID to later steps via GITHUB_ENV."
     required: false
     default: "false"
-  repository:
-    description: "Test override for GITHUB_REPOSITORY."
-    required: false
-    default: ""
-  repository-id:
-    description: "Test override for GITHUB_REPOSITORY_ID."
-    required: false
-    default: ""
-  run-id:
-    description: "Test override for GITHUB_RUN_ID."
-    required: false
-    default: ""
-  run-attempt:
-    description: "Test override for GITHUB_RUN_ATTEMPT."
-    required: false
-    default: ""
-  sha:
-    description: "Test override for GITHUB_SHA."
-    required: false
-    default: ""
 
 outputs:
   trailers:
@@ -76,9 +56,4 @@ runs:
         PA_BASE: ${{ inputs.base }}
         PA_HOST: ${{ inputs.host }}
         PA_EXPORT_ENV: ${{ inputs.export-env }}
-        PA_REPOSITORY: ${{ inputs.repository }}
-        PA_REPOSITORY_ID: ${{ inputs.repository-id }}
-        PA_RUN_ID: ${{ inputs.run-id }}
-        PA_RUN_ATTEMPT: ${{ inputs.run-attempt }}
-        PA_SHA: ${{ inputs.sha }}
       run: '"$GITHUB_ACTION_PATH/render.sh"'

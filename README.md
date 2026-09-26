@@ -4,38 +4,52 @@ A GitHub composite action that renders the 2AMLogic provenance stamps for a
 CI bot: the three commit trailers and the hidden `loom:provenance v1` PR
 marker. It is one bash script: no dependencies, no network, no secrets.
 
+It is for **deterministic tools only** (evidence regenerators, bench-table
+bots, relabelers, resync scripts). It always writes `prompts=none sweep=none`,
+which is only true for a program with no prompts and no sweep. Agent-driven CI
+that runs a model must not use it: its record needs the real `prompts=` and
+`sweep=` values.
+
 - **Trace**: with a `story` (`owner/repo#n`) it is the D32 v1 story trace,
   keyed on the numeric repo id (`GITHUB_REPOSITORY_ID` for a same-repo story;
   a story in another repo needs `story-repo-id`). With `story: none` (the
   default) it is the run's own trace, derived from
   `(GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT)`.
-- **Build**: `Loom-Build: <build-version> <GITHUB_SHA> clean`, with a full
-  40-hex SHA only. `build-version` defaults to `unknown`.
+- **Build**: `Loom-Build: <build-version> <GITHUB_SHA> <state>`, with a full
+  40-hex SHA only. `build-version` defaults to `unknown`. See
+  [Build state](#build-state) for `<state>`.
+- **Run context** (`GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_ID`,
+  `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_SHA`) is read from the
+  Actions environment only. There are no inputs to override it, so a caller
+  cannot stamp another run's `run=` or mix one repo's name with another's id.
 - Bad input (abbreviated SHA, malformed story, `none` build, a cross-repo
-  story without its repo id) fails the step. Nothing is emitted.
+  story without its repo id, a newline or `-->` in any value) and a missing
+  or failing `sha256sum`/`shasum` fail the step. Nothing is emitted.
 
 ## Usage
 
 ```yaml
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write        # for the commit/push step below; the action itself needs none
+  pull-requests: write   # for the PR step below
 
 steps:
-  - uses: actions/checkout@v4
-  - id: prov
-    uses: 2AMLogic/provenance-action@main   # pin to a commit SHA in production
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+  - id: prov              # run before your tool writes to the tree (see Build state)
+    uses: 2AMLogic/provenance-action@<40-hex commit>   # pin to a full commit SHA
     with:
       build-version: 1.4.0                   # your tool's version, or omit for "unknown"
-      # story: 2AMLogic/example#12           # omit for automation with no issue
       # installs: "0.19.409 <40-hex>"        # if this run installs another program
+
+  - name: Regenerate evidence
+    run: ./tools/regenerate-evidence
 
   - name: Commit with trailers
     env:
       TRAILERS: ${{ steps.prov.outputs.trailers }}
       MARKER: ${{ steps.prov.outputs.marker }}
     run: |
-      git commit -m "chore: regenerate evidence" -m "$MARKER" -m "$TRAILERS"
+      git commit -am "chore: regenerate evidence" -m "$MARKER" -m "$TRAILERS"
 
   - name: Open a PR with the marker
     env:
@@ -50,12 +64,59 @@ A commit pushed without a PR carries the marker in its body above the
 trailers, as shown. A commit that is also going into a PR can drop the
 `-m "$MARKER"`.
 
+### Stories
+
+For a story in the **same repo** as the workflow, `story` is enough; the key
+is `GITHUB_REPOSITORY_ID`:
+
+```yaml
+    with:
+      story: ${{ github.repository }}#12
+```
+
+For a story in **another repo**, also pass that repo's numeric id
+(`gh api repos/2AMLogic/example --jq .id`). A repo name is never used as the
+key, so without `story-repo-id` the step fails:
+
+```yaml
+    with:
+      story: 2AMLogic/example#12
+      story-repo-id: "123456789"   # gh api repos/2AMLogic/example --jq .id
+```
+
 Outputs: `trailers` (exactly three lines), `marker` (one line) and
 `trace-id`. With `export-env: "true"` they are also exported to later steps
 as `PROVENANCE_TRAILERS`, `PROVENANCE_MARKER` and `PROVENANCE_TRACE_ID`.
-Other inputs are `base` (defaults to `GITHUB_SHA`), `host` (defaults to
-`none`, because a GitHub-hosted runner is not a fleet host) and test
-overrides for the run context.
+Other inputs are `base` (defaults to `GITHUB_SHA`) and `host` (defaults to
+`none`, because a GitHub-hosted runner is not a fleet host).
+
+### Build state
+
+The third `Loom-Build` field says whether the code that ran is exactly
+`GITHUB_SHA`:
+
+- `clean`: git is available, `GITHUB_WORKSPACE` is a checkout whose `HEAD`
+  is `GITHUB_SHA`, and `git diff --quiet HEAD` succeeds there.
+- `dirty`: `HEAD` is `GITHUB_SHA` but tracked files differ from it.
+- `unknown`: anything else (no git, no checkout, `HEAD` is another commit,
+  for example `actions/checkout` with a different `ref:`, or git errors).
+
+Untracked files are not considered. The state is measured when the step
+runs, so run it after checkout and **before** your tool modifies the tree;
+otherwise the tool's own output makes the stamp `dirty`.
+
+### `pull_request` events
+
+On `pull_request` events `GITHUB_SHA` is the synthetic merge commit of
+`refs/pull/N/merge`, not the PR head. The action still uses it for
+`Loom-Build` and the default `base`: the spec (`docs/provenance.md`,
+"Automation with no story") defines the workflow build as `$GITHUB_SHA`, "the
+full commit of the workflow's repo that the run executed", and on
+`pull_request` the merge commit is what `actions/checkout` checks out and
+runs. It is not durable, though: GitHub recreates it as the base moves and
+it can be garbage-collected. Stamping bots should therefore run on `push`,
+`schedule` or `workflow_dispatch`, where `GITHUB_SHA` is a real branch
+commit.
 
 ## Policy
 
@@ -66,7 +127,9 @@ those references may not resolve for outside readers. Where this action and
 the policy disagree, the policy wins.
 
 `tests/run.sh` checks the published D32 vectors and the CI run vector byte
-for byte.
+for byte (with `sha256sum` and again with `shasum` alone), plus output
+injection into every input, hasher failures, the all-zero digest and the
+build state. CI runs it on Ubuntu and on macOS under `/bin/bash` 3.2.
 
 ## License
 
