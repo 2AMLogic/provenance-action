@@ -84,33 +84,30 @@ jobs:
           esac
           echo "story stamps OK"
 
-      # Failure cases. PROVENANCE_ACTION_ERROR_FILE lets the assert step check
-      # why each one failed, not only that it did.
+      # Failure cases through the action interface: outcome and empty outputs
+      # only. The reasons are checked by the next step, which runs render.sh
+      # directly with stderr captured.
       - id: crossrepo
         uses: ./
         continue-on-error: true
-        env:
-          PROVENANCE_ACTION_ERROR_FILE: ${{ runner.temp }}/crossrepo.err
         with:
           story: 2AMLogic/harness-ops#307
 
       - id: nonebuild
         uses: ./
         continue-on-error: true
-        env:
-          PROVENANCE_ACTION_ERROR_FILE: ${{ runner.temp }}/nonebuild.err
         with:
           build-version: none
 
+      # A rejected value carrying workflow commands: if stderr echoed it raw,
+      # the runner would set the render step's marker output.
       - id: injection
         uses: ./
         continue-on-error: true
-        env:
-          PROVENANCE_ACTION_ERROR_FILE: ${{ runner.temp }}/injection.err
         with:
-          build-version: "1.0.0\n-->\ntrace-id=00000000000000000000000000000001"
+          build-version: "1.0.0\n::set-output name=marker::forged\n::set-output name=trace-id::00000000000000000000000000000001\n-->"
 
-      - name: Assert bad input fails loudly, for the right reason, emitting nothing
+      - name: Assert bad input fails the step and emits nothing
         env:
           CROSSREPO_OUTCOME: ${{ steps.crossrepo.outcome }}
           CROSSREPO_TRACE: ${{ steps.crossrepo.outputs.trace-id }}
@@ -119,19 +116,37 @@ jobs:
           INJECTION_OUTCOME: ${{ steps.injection.outcome }}
           INJECTION_TRACE: ${{ steps.injection.outputs.trace-id }}
           INJECTION_MARKER: ${{ steps.injection.outputs.marker }}
-          ERR_DIR: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          check() { # name outcome trace pattern
+          for c in "crossrepo $CROSSREPO_OUTCOME $CROSSREPO_TRACE" "nonebuild $NONEBUILD_OUTCOME $NONEBUILD_TRACE" "injection $INJECTION_OUTCOME $INJECTION_TRACE"; do
+            set -- $c
             [ "$2" = failure ] || { echo "$1: outcome $2, want failure"; exit 1; }
-            [ -z "$3" ] || { echo "$1: emitted trace-id '$3' on failure"; exit 1; }
-            grep -F -- "$4" "$ERR_DIR/$1.err" || { echo "$1: want '$4', got: $(cat "$ERR_DIR/$1.err" 2>&1)"; exit 1; }
+            [ -z "${3:-}" ] || { echo "$1: emitted trace-id on failure"; exit 1; }
+          done
+          [ -z "$INJECTION_MARKER" ] || { echo "injection: a marker output was set: $INJECTION_MARKER"; exit 1; }
+          echo "failure outcomes OK"
+
+      - name: Assert failure reasons (render.sh directly, stderr captured)
+        run: |
+          set -euo pipefail
+          out=$RUNNER_TEMP/reason
+          mkdir -p "$out"
+          reason() { # name pattern VAR=VALUE...
+            local name=$1 pat=$2; shift 2
+            : >"$out/o"; : >"$out/e"
+            if env "$@" GITHUB_OUTPUT="$out/o" GITHUB_ENV="$out/e" "$GITHUB_WORKSPACE/render.sh" >"$out/stdout" 2>"$out/stderr"; then
+              echo "$name: exit 0"; exit 1
+            fi
+            [ ! -s "$out/stdout" ] && [ ! -s "$out/o" ] && [ ! -s "$out/e" ] || { echo "$name: emitted output"; exit 1; }
+            ! grep -q '^::' "$out/stderr" || { echo "$name: stderr line starts with '::'"; exit 1; }
+            [ "$(wc -l <"$out/stderr")" -eq 1 ] || { echo "$name: stderr is not one line"; exit 1; }
+            grep -F -- "$pat" "$out/stderr" || { echo "$name: want '$pat', got: $(cat "$out/stderr")"; exit 1; }
           }
-          check crossrepo "$CROSSREPO_OUTCOME" "$CROSSREPO_TRACE" "pass its numeric id as story-repo-id"
-          check nonebuild "$NONEBUILD_OUTCOME" "$NONEBUILD_TRACE" "build-version may not be 'none'"
-          check injection "$INJECTION_OUTCOME" "$INJECTION_TRACE" "build-version must match"
-          [ -z "$INJECTION_MARKER" ] || { echo "injection: emitted marker"; exit 1; }
-          echo "failures OK"
+          reason crossrepo "pass its numeric id as story-repo-id" PA_STORY=2AMLogic/harness-ops#307
+          reason nonebuild "build-version may not be 'none'" PA_BUILD_VERSION=none
+          reason injection "(got '1.0.0\x0a\x3a\x3aset-output\x20name\x3dmarker\x3a\x3aforged')" \
+            PA_BUILD_VERSION="$(printf '1.0.0\n::set-output name=marker::forged')"
+          echo "failure reasons OK"
 
       # Last: dirty the checkout and expect Loom-Build to say so.
       - name: Modify a tracked file

@@ -24,17 +24,36 @@
 #
 # Outputs: prints the three trailers and the marker to stdout, and appends
 # `trailers`, `marker` and `trace-id` to $GITHUB_OUTPUT when it is set.
-# Any invalid input or tool failure exits non-zero with an "error:" line on
-# stderr, and nothing is emitted. If PROVENANCE_ACTION_ERROR_FILE is set, the
-# error line is also written there (used by the workflow self-test to check
-# why a step failed).
+# Any invalid input or tool failure exits non-zero with one "error:" line on
+# stderr, and nothing is emitted. Rejected values are echoed only escaped.
 set -euo pipefail
 
+# esc VALUE: VALUE with every byte outside [A-Za-z0-9._#/+-] written as \xNN,
+# so an error message never carries raw input (a newline followed by
+# "::set-output" or "::add-mask::" would be a runner workflow command).
+esc() {
+  local hex h d out=
+  hex=$(printf '%s' "$1" | od -An -v -tx1 2>/dev/null) || { printf '<unprintable>'; return; }
+  for h in $hex; do
+    d=$((16#$h))
+    if ((d >= 48 && d <= 57 || d >= 65 && d <= 90 || d >= 97 && d <= 122)) \
+      || ((d == 46 || d == 95 || d == 35 || d == 47 || d == 43 || d == 45)); then
+      out="$out$(printf "\\x$h")"
+    else
+      out="$out\\x$h"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Every value interpolated into a die message goes through esc. As a second
+# guard, CR and LF in the final message are escaped too, so stderr is always
+# exactly one line starting with "provenance-action: error:".
 die() {
-  printf 'provenance-action: error: %s\n' "$*" >&2
-  if [[ -n ${PROVENANCE_ACTION_ERROR_FILE:-} ]]; then
-    printf 'provenance-action: error: %s\n' "$*" >"$PROVENANCE_ACTION_ERROR_FILE" || true
-  fi
+  local msg="$*"
+  msg=${msg//$'\n'/\\x0a}
+  msg=${msg//$'\r'/\\x0d}
+  printf 'provenance-action: error: %s\n' "$msg" >&2
   exit 1
 }
 
@@ -82,7 +101,7 @@ ci_run_trace() {
 }
 
 # clean | dirty | unknown for the workspace against GITHUB_SHA (see header).
-build_state() {
+measure_build_state() {
   local ws=${GITHUB_WORKSPACE:-} head rc
   [[ -n $ws && -d $ws ]] || { printf unknown; return; }
   command -v git >/dev/null 2>&1 || { printf unknown; return; }
@@ -119,32 +138,32 @@ base=${PA_BASE:-$sha}
 case $export_env in
   true) [[ -n ${GITHUB_ENV:-} ]] || die "export-env is true but GITHUB_ENV is not set" ;;
   false) ;;
-  *) die "export-env must be 'true' or 'false' (got '${export_env}')" ;;
+  *) die "export-env must be 'true' or 'false' (got '$(esc "$export_env")')" ;;
 esac
 
 # --- Run context -----------------------------------------------------------
-is_repo "$repo" || die "GITHUB_REPOSITORY must be owner/repo (got '${repo}')"
-is_dec "$run_id" || die "GITHUB_RUN_ID must be a positive decimal integer (got '${run_id}')"
+is_repo "$repo" || die "GITHUB_REPOSITORY must be owner/repo (got '$(esc "$repo")')"
+is_dec "$run_id" || die "GITHUB_RUN_ID must be a positive decimal integer (got '$(esc "$run_id")')"
 is_dec "$run_attempt" && ((${#run_attempt} <= 10)) && ((run_attempt <= 4294967295)) \
-  || die "GITHUB_RUN_ATTEMPT must be a positive decimal integer that fits in 32 bits (got '${run_attempt}')"
-is_sha "$sha" || die "GITHUB_SHA must be a full 40-hex lowercase SHA (got '${sha}'); abbreviated SHAs are never emitted"
+  || die "GITHUB_RUN_ATTEMPT must be a positive decimal integer that fits in 32 bits (got '$(esc "$run_attempt")')"
+is_sha "$sha" || die "GITHUB_SHA must be a full 40-hex lowercase SHA (got '$(esc "$sha")'); abbreviated SHAs are never emitted"
 
 # --- Build -----------------------------------------------------------------
 [[ $build_version == none ]] && die "build-version may not be 'none' (use 'unknown' if it cannot be determined)"
-is_version "$build_version" || die "build-version must match [A-Za-z0-9._+-]+ without '--' (got '${build_version}')"
+is_version "$build_version" || die "build-version must match [A-Za-z0-9._+-]+ without '--' (got '$(esc "$build_version")')"
 
 # --- Host / base -----------------------------------------------------------
 [[ $host == none || $host == unknown ]] || [[ $host =~ ^[A-Za-z0-9._-]+$ && $host != *--* ]] \
-  || die "host must be a host.id, 'none' or 'unknown' (got '${host}')"
+  || die "host must be a host.id, 'none' or 'unknown' (got '$(esc "$host")')"
 [[ $base == none || $base == unknown ]] || is_sha "$base" \
-  || die "base must be a full 40-hex lowercase SHA, 'none' or 'unknown' (got '${base}')"
+  || die "base must be a full 40-hex lowercase SHA, 'none' or 'unknown' (got '$(esc "$base")')"
 
 # --- Installs (optional) ---------------------------------------------------
 if [[ -n $installs ]]; then
-  [[ $installs =~ ^([^[:space:]]+)\ ([^[:space:]]+)$ ]] || die "installs must be '<version> <40-hex>' (got '${installs}')"
+  [[ $installs =~ ^([^[:space:]]+)\ ([^[:space:]]+)$ ]] || die "installs must be '<version> <40-hex>' (got '$(esc "$installs")')"
   iv=${BASH_REMATCH[1]} ic=${BASH_REMATCH[2]}
-  [[ $iv != none ]] && is_version "$iv" || die "installs version must match [A-Za-z0-9._+-]+ or be 'unknown' (got '${iv}')"
-  [[ $ic == unknown ]] || is_sha "$ic" || die "installs commit must be a full 40-hex lowercase SHA or 'unknown' (got '${ic}')"
+  [[ $iv != none ]] && is_version "$iv" || die "installs version must match [A-Za-z0-9._+-]+ or be 'unknown' (got '$(esc "$iv")')"
+  [[ $ic == unknown ]] || is_sha "$ic" || die "installs commit must be a full 40-hex lowercase SHA or 'unknown' (got '$(esc "$ic")')"
 fi
 
 # --- Story and trace -------------------------------------------------------
@@ -156,33 +175,33 @@ elif [[ $story == unknown ]]; then
   die "story 'unknown' is not accepted: CI automation either works on a story (owner/repo#n) or has none ('none')"
 else
   [[ $story =~ ^([A-Za-z0-9-]+/[A-Za-z0-9._-]+)#([1-9][0-9]*)$ ]] \
-    || die "story must be owner/repo#n or 'none' (got '${story}')"
+    || die "story must be owner/repo#n or 'none' (got '$(esc "$story")')"
   story_repo=${BASH_REMATCH[1]} number=${BASH_REMATCH[2]}
   if [[ $(lower "$story_repo") == "$(lower "$repo")" ]]; then
-    is_dec "$repo_id" || die "GITHUB_REPOSITORY_ID must be a positive decimal integer (got '${repo_id}')"
+    is_dec "$repo_id" || die "GITHUB_REPOSITORY_ID must be a positive decimal integer (got '$(esc "$repo_id")')"
     if [[ -n $story_repo_id && $story_repo_id != "$repo_id" ]]; then
-      die "story-repo-id ${story_repo_id} contradicts this run's repository id ${repo_id}"
+      die "story-repo-id $(esc "$story_repo_id") contradicts this run's repository id $(esc "$repo_id")"
     fi
     key_id=$repo_id
   else
     [[ -n $story_repo_id ]] \
-      || die "story ${story} is in another repository than ${repo}; pass its numeric id as story-repo-id (gh api repos/${story_repo} --jq .id). A repo name is never used as the key."
-    is_dec "$story_repo_id" || die "story-repo-id must be a positive decimal integer (got '${story_repo_id}')"
+      || die "story $(esc "$story") is in another repository than $(esc "$repo"); pass its numeric id as story-repo-id (gh api repos/$(esc "$story_repo") --jq .id). A repo name is never used as the key."
+    is_dec "$story_repo_id" || die "story-repo-id must be a positive decimal integer (got '$(esc "$story_repo_id")')"
     key_id=$story_repo_id
   fi
   d32_trace "$key_id" "$number"
 fi
-[[ $trace =~ ^[0-9a-f]{32}$ ]] || die "internal: trace id '${trace}' is not 32 lowercase hex; refusing"
+[[ $trace =~ ^[0-9a-f]{32}$ ]] || die "internal: trace id '$(esc "$trace")' is not 32 lowercase hex; refusing"
 
-dirty=$(build_state)
-case $dirty in clean | dirty | unknown) ;; *) die "internal: build state '${dirty}'" ;; esac
+build_state=$(measure_build_state)
+case $build_state in clean | dirty | unknown) ;; *) die "internal: build state '$(esc "$build_state")'" ;; esac
 
 # --- Render ----------------------------------------------------------------
 trailers="Loom-Story: ${story}
 Loom-Trace-Id: ${trace}
-Loom-Build: ${build_version} ${sha} ${dirty}"
+Loom-Build: ${build_version} ${sha} ${build_state}"
 
-marker="<!-- loom:provenance v1 build=${build_version} ${sha} ${dirty} prompts=none sweep=none story=${story} trace=${trace} host=${host} base=${base} run=${repo}/actions/runs/${run_id}/${run_attempt}"
+marker="<!-- loom:provenance v1 build=${build_version} ${sha} ${build_state} prompts=none sweep=none story=${story} trace=${trace} host=${host} base=${base} run=${repo}/actions/runs/${run_id}/${run_attempt}"
 [[ -n $installs ]] && marker="${marker} installs=${installs}"
 marker="${marker} -->"
 

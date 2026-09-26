@@ -33,6 +33,12 @@ expect_fail() { # name pattern VAR=VALUE...
   local name=$1 pat=$2; shift 2
   if render "$@"; then bad "$name (exit 0)"; return; fi
   if [[ -s $tmp/out || -s $tmp/gh_output || -s $tmp/gh_env ]]; then bad "$name (emitted output on failure)"; return; fi
+  # stderr is one line, starts with the error prefix, and no line starts with
+  # "::" (the runner parses stderr for workflow commands).
+  if grep -q '^::' "$tmp/err"; then bad "$name (stderr line starts with '::')"; return; fi
+  if [[ $(wc -l <"$tmp/err") -ne 1 ]] || ! head -n 1 "$tmp/err" | grep -q '^provenance-action: error: '; then
+    bad "$name (stderr is not one error line: $(od -c "$tmp/err" | head -n 5))"; return
+  fi
   if grep -q -- "$pat" "$tmp/err"; then ok "$name"; else bad "$name (want '$pat', stderr: $(cat "$tmp/err"))"; fi
 }
 # check_gh_output name trailers marker trace : $tmp/gh_output with a random
@@ -218,15 +224,17 @@ expect_fail "base short sha"         "base must"        "${CTX[@]}" PA_BASE=abc1
 expect_fail "bad host"               "host must"        "${CTX[@]}" PA_HOST='a b'
 expect_fail "bad export-env"         "export-env must"  "${CTX[@]}" PA_EXPORT_ENV=yes
 
-# Error file hook (the workflow self-test reads it to check the reason).
-render "${CTX[@]}" PA_BUILD_VERSION=none PROVENANCE_ACTION_ERROR_FILE="$tmp/errfile" || true
-if grep -q "may not be 'none'" "$tmp/errfile" 2>/dev/null; then ok "error file gets the message"; else bad "error file gets the message"; fi
+# Rejected values are echoed only escaped (\xNN for bytes outside [A-Za-z0-9._#/+-]).
+expect_fail "rejected value is escaped" \
+  "(got '1\\\\x0a\\\\x3a\\\\x3aadd-mask\\\\x3a\\\\x3az\\\\x0d\\\\x24\\\\x28id\\\\x29')" \
+  "${CTX[@]}" PA_BUILD_VERSION=$'1\n::add-mask::z\r$(id)'
 
 # --- Output injection: every input and context variable ---------------------
 # Each payload is appended to an otherwise valid value. The last payload puts
 # a heredoc-delimiter-shaped line into the value.
-PAYLOADS=($'\ninjected' $'\rinjected' '-->' '>' '$(id)' $'\nPROVENANCE_EOF_00000000000000000000000000000000\nLoom-Story: evil')
-PNAMES=(newline CR '-->' '>' '$(...)' 'delimiter line')
+PAYLOADS=($'\ninjected' $'\rinjected' '-->' '>' '$(id)' $'\nPROVENANCE_EOF_00000000000000000000000000000000\nLoom-Story: evil'
+  $'\n::set-output name=marker::<!-- forged -->' $'\n::add-mask::z' $'\r\n::error file=x::spoof' $'\n::stop-commands::tok')
+PNAMES=(newline CR '-->' '>' '$(...)' 'delimiter line' '::set-output' '::add-mask::' '::error' '::stop-commands::')
 FIELDS=(
   "PA_STORY|2AMLogic/loom#1|story must"
   "PA_STORY_REPO_ID|5|story-repo-id must"
