@@ -1,0 +1,165 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: bash tests/run.sh
+
+  # macOS: /bin/bash 3.2 and shasum. tests/run.sh also re-runs every vector
+  # with shasum as the only hasher on PATH, so the shasum branch is exercised
+  # whether or not the image also ships a sha256sum.
+  vectors-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run tests under /bin/bash 3.2
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          v=$(env bash -c 'echo "$BASH_VERSION"')
+          echo "bash on PATH: $(command -v bash) $v"
+          case $v in 3.2.*) ;; *) echo "expected bash 3.2 first on PATH, got $v"; exit 1 ;; esac
+          command -v shasum
+          /bin/bash tests/run.sh
+
+  self:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - id: nostory
+        uses: ./
+        with:
+          build-version: 1.0.0
+          export-env: "true"
+
+      - name: Assert no-story output shape
+        env:
+          TRAILERS: ${{ steps.nostory.outputs.trailers }}
+          MARKER: ${{ steps.nostory.outputs.marker }}
+          TRACE: ${{ steps.nostory.outputs.trace-id }}
+        run: |
+          set -euo pipefail
+          want=$(printf '%s\0%s\0%s\0%s\0' loom.ci.trace "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | sha256sum | cut -c1-32)
+          expected_trailers=$(printf 'Loom-Story: none\nLoom-Trace-Id: %s\nLoom-Build: 1.0.0 %s clean' "$want" "$GITHUB_SHA")
+          [ "$TRAILERS" = "$expected_trailers" ] || { printf 'trailers:\n%s\nwant:\n%s\n' "$TRAILERS" "$expected_trailers"; exit 1; }
+          [ "$(printf '%s\n' "$TRAILERS" | wc -l)" -eq 3 ]
+          [ "$TRACE" = "$want" ]
+          expected_marker="<!-- loom:provenance v1 build=1.0.0 $GITHUB_SHA clean prompts=none sweep=none story=none trace=$want host=none base=$GITHUB_SHA run=$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT -->"
+          [ "$MARKER" = "$expected_marker" ] || { printf 'marker: %s\nwant:   %s\n' "$MARKER" "$expected_marker"; exit 1; }
+          [ "$PROVENANCE_TRAILERS" = "$TRAILERS" ]
+          [ "$PROVENANCE_MARKER" = "$MARKER" ]
+          [ "$PROVENANCE_TRACE_ID" = "$TRACE" ]
+          echo "no-story stamps OK"
+
+      - id: story
+        uses: ./
+        with:
+          story: ${{ github.repository }}#1
+
+      - name: Assert same-repo story uses D32 v1 over GITHUB_REPOSITORY_ID
+        env:
+          TRAILERS: ${{ steps.story.outputs.trailers }}
+          MARKER: ${{ steps.story.outputs.marker }}
+          TRACE: ${{ steps.story.outputs.trace-id }}
+        run: |
+          set -euo pipefail
+          want=$(printf '%s' "loom-story/v1:github:${GITHUB_REPOSITORY_ID}:1" | sha256sum | cut -c1-32)
+          [ "$TRACE" = "$want" ]
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 1p)" = "Loom-Story: $GITHUB_REPOSITORY#1" ]
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 2p)" = "Loom-Trace-Id: $want" ]
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 3p)" = "Loom-Build: unknown $GITHUB_SHA clean" ]
+          case "$MARKER" in
+            "<!-- loom:provenance v1 build=unknown $GITHUB_SHA clean prompts=none sweep=none story=$GITHUB_REPOSITORY#1 trace=$want host=none base=$GITHUB_SHA run=$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT -->") ;;
+            *) echo "unexpected marker: $MARKER"; exit 1 ;;
+          esac
+          echo "story stamps OK"
+
+      # Failure cases through the action interface: outcome and empty outputs
+      # only. The reasons are checked by the next step, which runs render.sh
+      # directly with stderr captured.
+      - id: crossrepo
+        uses: ./
+        continue-on-error: true
+        with:
+          story: 2AMLogic/harness-ops#307
+
+      - id: nonebuild
+        uses: ./
+        continue-on-error: true
+        with:
+          build-version: none
+
+      # A rejected value carrying workflow commands: if stderr echoed it raw,
+      # the runner would set the render step's marker output.
+      - id: injection
+        uses: ./
+        continue-on-error: true
+        with:
+          build-version: "1.0.0\n::set-output name=marker::forged\n::set-output name=trace-id::00000000000000000000000000000001\n-->"
+
+      - name: Assert bad input fails the step and emits nothing
+        env:
+          CROSSREPO_OUTCOME: ${{ steps.crossrepo.outcome }}
+          CROSSREPO_TRACE: ${{ steps.crossrepo.outputs.trace-id }}
+          NONEBUILD_OUTCOME: ${{ steps.nonebuild.outcome }}
+          NONEBUILD_TRACE: ${{ steps.nonebuild.outputs.trace-id }}
+          INJECTION_OUTCOME: ${{ steps.injection.outcome }}
+          INJECTION_TRACE: ${{ steps.injection.outputs.trace-id }}
+          INJECTION_MARKER: ${{ steps.injection.outputs.marker }}
+        run: |
+          set -euo pipefail
+          for c in "crossrepo $CROSSREPO_OUTCOME $CROSSREPO_TRACE" "nonebuild $NONEBUILD_OUTCOME $NONEBUILD_TRACE" "injection $INJECTION_OUTCOME $INJECTION_TRACE"; do
+            set -- $c
+            [ "$2" = failure ] || { echo "$1: outcome $2, want failure"; exit 1; }
+            [ -z "${3:-}" ] || { echo "$1: emitted trace-id on failure"; exit 1; }
+          done
+          [ -z "$INJECTION_MARKER" ] || { echo "injection: a marker output was set: $INJECTION_MARKER"; exit 1; }
+          echo "failure outcomes OK"
+
+      - name: Assert failure reasons (render.sh directly, stderr captured)
+        run: |
+          set -euo pipefail
+          out=$RUNNER_TEMP/reason
+          mkdir -p "$out"
+          reason() { # name pattern VAR=VALUE...
+            local name=$1 pat=$2; shift 2
+            : >"$out/o"; : >"$out/e"
+            if env "$@" GITHUB_OUTPUT="$out/o" GITHUB_ENV="$out/e" "$GITHUB_WORKSPACE/render.sh" >"$out/stdout" 2>"$out/stderr"; then
+              echo "$name: exit 0"; exit 1
+            fi
+            [ ! -s "$out/stdout" ] && [ ! -s "$out/o" ] && [ ! -s "$out/e" ] || { echo "$name: emitted output"; exit 1; }
+            ! grep -q '^::' "$out/stderr" || { echo "$name: stderr line starts with '::'"; exit 1; }
+            [ "$(wc -l <"$out/stderr")" -eq 1 ] || { echo "$name: stderr is not one line"; exit 1; }
+            grep -F -- "$pat" "$out/stderr" || { echo "$name: want '$pat', got: $(cat "$out/stderr")"; exit 1; }
+          }
+          reason crossrepo "pass its numeric id as story-repo-id" PA_STORY=2AMLogic/harness-ops#307
+          reason nonebuild "build-version may not be 'none'" PA_BUILD_VERSION=none
+          reason injection "(got '1.0.0\x0a\x3a\x3aset-output\x20name\x3dmarker\x3a\x3aforged')" \
+            PA_BUILD_VERSION="$(printf '1.0.0\n::set-output name=marker::forged')"
+          echo "failure reasons OK"
+
+      # Last: dirty the checkout and expect Loom-Build to say so.
+      - name: Modify a tracked file
+        run: echo "local change" >> README.md
+
+      - id: dirty
+        uses: ./
+
+      - name: Assert a modified checkout stamps dirty
+        env:
+          TRAILERS: ${{ steps.dirty.outputs.trailers }}
+        run: |
+          set -euo pipefail
+          [ "$(printf '%s\n' "$TRAILERS" | sed -n 3p)" = "Loom-Build: unknown $GITHUB_SHA dirty" ] \
+            || { printf 'trailers:\n%s\n' "$TRAILERS"; exit 1; }
+          echo "dirty OK"

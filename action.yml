@@ -1,0 +1,59 @@
+name: 2AMLogic provenance stamps
+description: Renders the 2AMLogic provenance stamps (three commit trailers and the hidden loom:provenance v1 PR marker) for a deterministic CI bot. The run context is read from the Actions environment only. No network, no secrets.
+author: 2AMLogic
+
+inputs:
+  story:
+    description: "Story the bot's work belongs to, owner/repo#n, or 'none' for automation with no issue behind it."
+    required: false
+    default: none
+  story-repo-id:
+    description: "Numeric GitHub repository id of the story's repo. Required only when the story is in a different repo than the run (same-repo stories use GITHUB_REPOSITORY_ID)."
+    required: false
+    default: ""
+  build-version:
+    description: "Version of the emitting tool, or 'unknown' if it has none."
+    required: false
+    default: unknown
+  installs:
+    description: "Optional '<version> <40-hex>' of a program this run installs or copies into the repo."
+    required: false
+    default: ""
+  base:
+    description: "Full 40-hex commit the action started from, 'none' or 'unknown'. Defaults to GITHUB_SHA (on pull_request events that is the synthetic merge commit; see README)."
+    required: false
+    default: ""
+  host:
+    description: "Fleet host.id, or 'none' (a GitHub-hosted runner is not a fleet host)."
+    required: false
+    default: none
+  export-env:
+    description: "'true' to also export PROVENANCE_TRAILERS, PROVENANCE_MARKER and PROVENANCE_TRACE_ID to later steps via GITHUB_ENV."
+    required: false
+    default: "false"
+
+outputs:
+  trailers:
+    description: "Exactly three lines: Loom-Story, Loom-Trace-Id, Loom-Build."
+    value: ${{ steps.render.outputs.trailers }}
+  marker:
+    description: "One '<!-- loom:provenance v1 ... -->' line."
+    value: ${{ steps.render.outputs.marker }}
+  trace-id:
+    description: "The 32-hex trace id (D32 v1 for a story, else the CI run trace)."
+    value: ${{ steps.render.outputs.trace-id }}
+
+runs:
+  using: composite
+  steps:
+    - id: render
+      shell: bash
+      env:
+        PA_STORY: ${{ inputs.story }}
+        PA_STORY_REPO_ID: ${{ inputs.story-repo-id }}
+        PA_BUILD_VERSION: ${{ inputs.build-version }}
+        PA_INSTALLS: ${{ inputs.installs }}
+        PA_BASE: ${{ inputs.base }}
+        PA_HOST: ${{ inputs.host }}
+        PA_EXPORT_ENV: ${{ inputs.export-env }}
+      run: '"$GITHUB_ACTION_PATH/render.sh"'
