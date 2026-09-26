@@ -28,22 +28,31 @@
 # stderr, and nothing is emitted. Rejected values are echoed only escaped.
 set -euo pipefail
 
-# esc VALUE: VALUE with every byte outside [A-Za-z0-9._#/+-] written as \xNN,
-# so an error message never carries raw input (a newline followed by
+# esc VALUE: the first 64 bytes of VALUE with every byte outside
+# [A-Za-z0-9._#/+-] written as \xNN, followed by "…(+N bytes)" when VALUE was
+# longer, so an error message never carries raw input (a newline followed by
 # "::set-output" or "::add-mask::" would be a runner workflow command).
+# Truncation happens before escaping, and the bytes are read with a single od
+# call, so a huge rejected value still fails fast.
+ESC_ASCII=$' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~'
 esc() {
-  local hex h d out=
-  hex=$(printf '%s' "$1" | od -An -v -tx1 2>/dev/null) || { printf '<unprintable>'; return; }
+  local LC_ALL=C v=$1 n extra= hex h d out=
+  n=${#v}
+  if ((n > 64)); then
+    extra="…(+$((n - 64)) bytes)"
+    v=${v:0:64}
+  fi
+  hex=$(printf '%s' "$v" | od -An -v -tx1 2>/dev/null) || { printf '<unprintable>%s' "$extra"; return; }
   for h in $hex; do
     d=$((16#$h))
     if ((d >= 48 && d <= 57 || d >= 65 && d <= 90 || d >= 97 && d <= 122)) \
       || ((d == 46 || d == 95 || d == 35 || d == 47 || d == 43 || d == 45)); then
-      out="$out$(printf "\\x$h")"
+      out="$out${ESC_ASCII:d-32:1}"
     else
       out="$out\\x$h"
     fi
   done
-  printf '%s' "$out"
+  printf '%s%s' "$out" "$extra"
 }
 
 # Every value interpolated into a die message goes through esc. As a second

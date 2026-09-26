@@ -26,8 +26,9 @@ that runs a model must not use it: its record needs the real `prompts=` and
   story without its repo id, a newline or `-->` in any value) and a missing
   or failing `sha256sum`/`shasum` fail the step. Nothing is emitted, and
   nothing is echoed unescaped: the error is one stderr line in which each
-  rejected value has every byte outside `[A-Za-z0-9._#/+-]` written as
-  `\xNN`, so input can never start a `::workflow-command::` line.
+  rejected value is cut to its first 64 bytes (with `…(+N bytes)` for the
+  rest) and has every byte outside `[A-Za-z0-9._#/+-]` written as `\xNN`,
+  so input can never start a `::workflow-command::` line.
 
 ## Usage
 

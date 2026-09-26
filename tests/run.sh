@@ -229,6 +229,17 @@ expect_fail "rejected value is escaped" \
   "(got '1\\\\x0a\\\\x3a\\\\x3aadd-mask\\\\x3a\\\\x3az\\\\x0d\\\\x24\\\\x28id\\\\x29')" \
   "${CTX[@]}" PA_BUILD_VERSION=$'1\n::add-mask::z\r$(id)'
 
+# A huge rejected value fails fast and its echo is truncated to 64 bytes
+# (escaped) plus the count of the bytes dropped.
+big=$'\n::x'$(printf '%060d' 0)$(printf '%0102336d' 0)   # 102400 bytes
+zeros60=$(printf '%060d' 0)
+TIMEFORMAT=%R
+{ time expect_fail "100 KB rejected value: message truncated" \
+    "(got '\\\\x0a\\\\x3a\\\\x3ax${zeros60}…(+102336 bytes)')" \
+    "${CTX[@]}" PA_HOST="$big"; } 2>"$tmp/time"
+secs=$(tail -n 1 "$tmp/time")
+if [[ $secs =~ ^[0-9]+([.,][0-9]+)?$ && ${secs%%[.,]*} -lt 2 ]]; then ok "100 KB rejected value fails in under 2 s (${secs}s)"; else bad "100 KB rejected value fails in under 2 s (took '${secs}')"; fi
+
 # --- Output injection: every input and context variable ---------------------
 # Each payload is appended to an otherwise valid value. The last payload puts
 # a heredoc-delimiter-shaped line into the value.
